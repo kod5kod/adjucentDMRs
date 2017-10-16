@@ -1,0 +1,267 @@
+---
+title: "Adjucent DMRs Analysis V2"
+author: "Lee_Carlin"
+date: "10/8/2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Loading the relevant libraries and the B
+```{r loaddata, include=FALSE}
+library('GenomicRanges')  #loading required libraries
+library('bsseq')   #loading required libraries
+path = [BSseq object path]
+load(file = path) 
+```
+Print the properties of the data:
+```{r}
+DC
+dim(DC) # getting the dimension 
+sampleNames(DC) # getting the sample names
+pData(DC) # getting types of samples
+head(seqnames(DC), n = 10) # getting the 
+```
+
+One issue is the large size of the data. Let's restrict our analysis by sampling the data:
+```{r}
+start.time <- Sys.time()
+ob_start <- 1e+6 -10000
+ob_end <- 2e+6 +10000
+M <- data.frame(getCoverage(DC[ob_start:ob_end],  type = "M", what = "perBase")) # Retrieving the Methylation Readouts
+Cov <- data.frame(getCoverage(DC[ob_start:ob_end],  type = "Cov", what = "perBase")) # Retrieving the Coverage Readouts
+
+DCtmp <- BSseq(M = M, Cov = Cov, coef = NULL, se.coef = NULL, trans = NULL, parameters = NULL, 
+                  pData = pData(DC[ob_start:ob_end]), gr = granges(DC[ob_start:ob_end]), pos = start(DC[ob_start:ob_end]), chr = NULL, 
+                  sampleNames = NULL, rmZeroCov = FALSE) # constructing the BSseq object
+end.time <- Sys.time()
+cat("BSseq Object took ",end.time - start.time, " seconds to create\n") 
+
+DCtmp
+
+rm(DC) # removing DC to clear some memory
+```
+We smooth the data:
+```{r}
+start.time <- Sys.time()
+# Smoothing the sample using the default parameters:
+ns = 70 #The minimum number of methylation loci in a smoothing window
+h = 1000 #The minimum smoothing window, in bases.
+maxGap = 10^8  #The maximum gap between two methylation loci, before the smoothing is broken across the gap. The default smoothes each chromosome separately.
+DC.fit <- BSmooth(DCtmp, ns = ns, h = h, maxGap = maxGap, parallelBy = "sample", mc.preschedule = FALSE, mc.cores = 2, keep.se = FALSE, verbose = TRUE)
+
+end.time <- Sys.time()
+cat("BSseq Object took ",end.time - start.time, " seconds to smooth\n") 
+
+print(DC.fit)
+```
+Let's apply the get stats method on the smoothed BSseq:
+```{r}
+start.time <- Sys.time()
+
+stats <- BSmooth.tstat(DC.fit, group1 = c(1,3,5,7,9,11), group2 = c(2,4,6,8,10,12), estimate.var = "same", local.correct = TRUE, maxGap = NULL, qSd = 0.75, k = 101, mc.cores = 1, verbose = TRUE)
+
+end.time <- Sys.time()
+cat("BSseq Object took ",end.time - start.time, " seconds to produce stats") 
+
+#getStats(stats, regions = NULL)
+dmrs <- dmrFinder(stats, cutoff = NULL, qcutoff = c(0.025, 0.975), maxGap=300, stat = "tstat.corrected", verbose = TRUE)
+```
+An overview of the DMRs:
+```{r}
+head(dmrs)
+```
+
+
+A view of the density of the DMRS:
+```{r}
+plot(dmrs[,2:3], cex = 0.01)
+```
+The main function takes a DMRs dataframe and outputs a comprehensive analysis plot:
+```{r, fig.height=11, fig.width=13}
+plot_adjacent_dmrs<- function (dmrs,smoothed_bsseq,group1, group2,regions_to_plot = 1:3 , start_end_indx = NULL) {
+  ########################
+  # Plots given DMRs 
+  # Args:
+  #   dmrs: BSseq DMRs object
+  #   bsseq: A smoothed BSseq object 
+  #   group1: a vector specifying the sample indexes of group 1 of the BSseq object (e.g. c(1,3,5,7,9,11) )
+  #   group1: a vector specifying the sample indexes of group 2 (e.g. c(2,4,6,8,10,12) )
+  #   regions_to_plot: e.g. 1:5 or 10:20
+  #   start_end_indx: NULL; The start and end DMRs index e.g. c(1600,2000)
+  # Returns:
+  #   A graphical plot
+  ########################
+  dmrs <- dmrs[ order(dmrs[,'start']), ] #sorting the DMRS
+  if (is.null(start_end_indx)){ # if start_end_indx is not specified, uses regions_to_plot as default:
+    start_dmr <- dmrs[min(regions_to_plot),"idxStart"]
+    end_dmr <- dmrs[max(regions_to_plot),"idxEnd"]
+  }
+  gen_reg <- start(DC.fit[start_dmr:end_dmr]) # Getting the bases locations based on the parameters
+  # Getting the data for the plots:
+  group1_data <- data.frame(getMeth(smoothed_bsseq[start_dmr:end_dmr],  type = "smooth", what = "perBase" , confint = FALSE, alpha = 0.95))[group1]
+  group2_data <- data.frame(getMeth(smoothed_bsseq[start_dmr:end_dmr],  type = "smooth", what = "perBase" , confint = FALSE, alpha = 0.95))[group2]
+  group1_data['mean'] <- rowMeans(group1_data, na.rm = TRUE, dims = 1)
+  group1_data['var'] <- rowVars(as.matrix(group1_data[,1:length(group1)]), na.rm = TRUE, dims = 1)
+  group2_data['mean'] <- rowMeans(group2_data, na.rm = TRUE, dims = 1)
+  group2_data['var'] <- rowVars(as.matrix(group2_data[,1:length(group2)]), na.rm = TRUE, dims = 1)
+  group_diff <- as.matrix(group1_data['mean']-group2_data['mean'])
+  # Generating a layout figure to hosts the different graphs in one plot:
+  layout(matrix(c(1, 1, 1,1, 1, 1,2, 2, 2,2, 2, 2,2, 2, 2,2, 2, 2,3, 3, 3,3, 3, 3), nrow=8, byrow=TRUE))
+  # Plotting the first figure - difference methylation between groups:
+  plot(gen_reg,group_diff,type = "l",cex = .5, col='black',xlab = "genomic base", ylab="methylation difference")
+  abline(h = 0, v = 0, col = "gray60") # adding a zero  reference line
+  mtext(side = 3, line = -2, 'Smoothed Methylation Difference Between Groups')
+  # Plotting the second figure - group methylation with DMRs
+  plot(gen_reg,group1_data[,'mean'],type = "l",cex = .1, col='red' ,ylab = "methylation",xlab = "genomic base / index base", main = "Group Average Methylation with Adjacent DMRs")
+  lines(gen_reg,group2_data[,'mean'],type = "l",cex = .1, col='blue')
+  legend("topleft",horiz= TRUE , legend=c('group1', "group2","hyper DMR","hypo DMR"), lty=c(1,1,1,1), pch=c(NA, NA,NA, NA), col=c("red", "blue","#FFCC33","#00CC33"),lwd = c(1,1,4,4),bty = 'n')
+  start_indx <- max(which(dmrs$idxStart <= start_dmr)) 
+  end_indx <- min(which(dmrs$idxStart >= end_dmr))
+  dmrs_tuples <- cbind(dmrs[start_indx:end_indx,"start"],dmrs[start_indx:end_indx,"end"])
+  meth_direction <- gsub("hyper",1, dmrs[start_indx:end_indx,"direction"])  
+  meth_direction <- gsub("hypo",0, meth_direction)  
+  for( i in 1:dim(dmrs_tuples)[1] ){
+    rect(xleft=dmrs_tuples[i,1], xright=dmrs_tuples[i,2] , ybottom=0, ytop=1.2, density=NULL, col=rgb(red= meth_direction[i],green = 0.8, blue = 0.2,alpha = 0.2)) #,border = NA
+  }
+  genomic_regions_start_end <- as.vector(t((dmrs[start_indx:end_indx,c("start","end")])))
+  indx_regions_start_end <- as.vector(t((dmrs[start_indx:end_indx,c("idxStart","idxEnd")])))
+  axis(1,at =genomic_regions_start_end,labels=indx_regions_start_end,cex = 0.5,line=2,col="red",col.ticks="black",col.axis="black",las=2,ps = 0.1)
+  axis(2,xpd = TRUE)
+  text(x = dmrs$start[start_indx:end_indx], y = 0.7 , labels = regions_to_plot, adj = NULL, pos = 4, offset = 0, vfont = NULL, cex = 1.3, col = "black", font = NULL)
+  #axis(1,at =dmrs$start[start_indx:end_indx],labels=dmrs$idxStart[start_indx:end_indx],cex = 1,line=2,col="red",col.ticks="black",col.axis="black",las=2,ps = 0.1)  
+
+  # Plotting the third figure - individual methylation samples:  
+  temp_myth <- data.frame(getMeth(smoothed_bsseq[start_dmr:end_dmr],  type = "smooth", what = "perBase" , confint = FALSE, alpha = 0.95))
+  plot(gen_reg,temp_myth[,1],type = "l",cex = .1, col='red',xlab = "genomic base" ,ylab = "methylation", main = "Adjacent DMRs")
+  lines(gen_reg,temp_myth[,group2[1]],type = "l",cex = .1, col='blue')
+  for (i in 2:length(group1)){ # fix itteration over groups
+    lines(gen_reg,temp_myth[,group1[i]],type = "l",cex = .1, col='red')
+    lines(gen_reg,temp_myth[,group2[i]],type = "l",cex = .1, col='blue')
+  }
+  legend("topleft",inset =c(0,0) , legend=c('samples group 1', "samples group 2"), lty=c(1,1), pch=c(NA, NA), col=c("red", "blue"),bty = 'n')
+
+}
+
+#text(x = dmrs_tuples[,1], y = 0.7 , labels = c(start_indx:end_indx), adj = NULL, pos = NULL, offset = 0, vfont = NULL, cex = 0.1, col = meth_direction, font = NULL)
+
+######## TODO LIST: #########
+
+#### COMPLETED: #######
+## CHANGE COLOR ACCORDING TO HYPO OR HYPER ###DONE
+## Add plot regions by region number  ### DONE
+## add difference methylation ### DONE
+## add group average   ### DONE
+### Add legends    ### done
+### add DMR number  ### done
+### make sure to standerdize DMR dataframe (sort, ...) ### done
+#### add labels   ### done
+
+
+##### YET TO BE DONE: ######
+# fix itteration over groups
+## Fix y-axis spillout
+## Add error bands
+## Add end genomic location and not just start
+## add space before and after regoins
+
+## Find close DMRS with probes between them
+## Try to characterize these regions
+## Test for unimodality
+## Add variance before smoothing of the differential methylation
+## Automate the DMR dataframe for the entire genome creation
+## Automatically detect adjucents DMRs
+```
+Here is a sample: 
+```{r, fig.height=11, fig.width=13}
+group1 <- c(1,3,5,7,9,11)
+group2 <- c(2,4,6,8,10,12)
+regions_to_plot <- 1:5
+#start_dmr <- 1600 
+#end_dmr <- 2000
+
+plot_adjacent_dmrs(dmrs,DC.fit,group1,group2,regions_to_plot = regions_to_plot, start_end_indx = NULL )
+```
+
+
+
+```{r, fig.height=11, fig.width=13}
+start_dmr <- 1600
+end_dmr <- 2000
+group1 <- c(1,3,5,7,9,11)
+group2 <- c(2,4,6,8,10,12)
+
+regions_to_plot <- 6:12
+temp <- plot_adjacent_dmrs(dmrs,DC.fit,group1,group2,regions_to_plot = regions_to_plot, start_end_indx = NULL )
+```
+```{r, fig.height=11, fig.width=13}
+start_dmr <- 1600
+end_dmr <- 2000
+group1 <- c(1,3,5,7,9,11)
+group2 <- c(2,4,6,8,10,12)
+
+regions_to_plot <- 12:15
+temp <- plot_adjacent_dmrs(dmrs,DC.fit,group1,group2,regions_to_plot = regions_to_plot, start_end_indx = NULL )
+```
+```{r, fig.height=11, fig.width=13}
+start_dmr <- 1600
+end_dmr <- 2000
+group1 <- c(1,3,5,7,9,11)
+group2 <- c(2,4,6,8,10,12)
+
+regions_to_plot <- 15:20
+temp <- plot_adjacent_dmrs(dmrs,DC.fit,group1,group2,regions_to_plot = regions_to_plot, start_end_indx = NULL )
+```
+```{r, fig.height=11, fig.width=13}
+start_dmr <- 1600
+end_dmr <- 2000
+group1 <- c(1,3,5,7,9,11)
+group2 <- c(2,4,6,8,10,12)
+
+regions_to_plot <- 20:25
+temp <- plot_adjacent_dmrs(dmrs,DC.fit,group1,group2,regions_to_plot = regions_to_plot, start_end_indx = NULL )
+```
+```{r, fig.height=11, fig.width=13}
+start_dmr <- 1600
+end_dmr <- 2000
+group1 <- c(1,3,5,7,9,11)
+group2 <- c(2,4,6,8,10,12)
+
+regions_to_plot <- 24:30
+temp <- plot_adjacent_dmrs(dmrs,DC.fit,group1,group2,regions_to_plot = regions_to_plot, start_end_indx = NULL )
+```
+
+
+Here is a plot with error bands for the two groups (I will add it to the main plot in the future I think):
+```{r, fig.height=7, fig.width=13}
+library("ggplot2")
+regions_to_plot = 10:15
+start_dmr <- dmrs[min(regions_to_plot),"idxStart"]
+end_dmr <- dmrs[max(regions_to_plot),"idxEnd"]
+group1_data <- data.frame(getMeth(DC.fit[start_dmr:end_dmr],  type = "smooth", what = "perBase" , confint = FALSE, alpha = 0.95))[group1]
+group2_data <- data.frame(getMeth(DC.fit[start_dmr:end_dmr],  type = "smooth", what = "perBase" , confint = FALSE, alpha = 0.95))[group2]
+g_data <- data.frame(gen = start(DC.fit[start_dmr:end_dmr])) # Getting the bases locations based on the parameters
+g_data['mean1'] <- rowMeans(group1_data, na.rm = TRUE, dims = 1)
+g_data['var1'] <- rowVars(as.matrix(group1_data[,1:length(group1)]), na.rm = TRUE, dims = 1)
+g_data['mean2'] <- rowMeans(group2_data, na.rm = TRUE, dims = 1)
+g_data['var2'] <- rowVars(as.matrix(group2_data[,1:length(group2)]), na.rm = TRUE, dims = 1)
+g_data['diff'] <- g_data['mean1']-g_data['mean2']
+
+gg <- ggplot(data = g_data)
+gg + geom_ribbon( aes(x = gen,ymin=mean1-sqrt(var1), ymax=mean1+sqrt(var1),fill = 'red', alpha = 100))+  geom_ribbon( aes(x = gen,ymin=mean2-sqrt(var2), ymax=mean2+sqrt(var2),fill = 'blue', alpha = 100)) + geom_line(aes(x=gen, y=mean1, col = 'red')) + geom_line(aes(x=gen, y=mean2, col = 'blue')) 
+
+
+####                                                                                               
+#start_indx <- max(which(dmrs$idxStart <= start_dmr)) 
+#gg
+#ggplot( data = g_data, aes(x=gen, y=mean1)) +  geom_ribbon( aes(ymin=mean1-sqrt(var1), ymax=mean1+sqrt(var1)))+ geom_line()+  geom_ribbon( aes(ymin=mean2-sqrt(var2)
+#start_indx <- max(which(dmrs$idxStart <= start_dmr)) 
+#end_indx <- min(which(dmrs$idxStart >= end_dmr))
+#dmrs_tuples <- cbind(dmrs[start_indx:end_indx,"start"],dmrs[start_indx:end_indx,"end"])
+##meth_direction <- gsub("hyper","green", dmrs[start_indx:end_indx,"direction"])  
+#meth_direction <- gsub("hypo","lightskyblue4", meth_direction)  
+#for( i in 1:dim(dmrs_tuples)[1] ){
+#  rect(xleft=dmrs_tuples[i,1], xright=dmrs_tuples[i,2] , ybottom=0, ytop=1.2, density=30, col=meth_direction[i])
+#}
+#axis(1,at =dmrs$start[start_indx:end_indx],labels=dmrs$idxStart[start_indx:end_indx],cex = 1,line=2,col="red",col.ticks="black",col.axis="black",las=2,ps = 0.1)  
+```
